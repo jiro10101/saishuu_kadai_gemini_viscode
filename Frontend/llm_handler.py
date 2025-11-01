@@ -1,10 +1,10 @@
 import logging
 import re
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.output_parser import StrOutputParser
-from langchain.schema.runnable import Runnable
-from .config import settings, TARGET_DEVICE, MAX_RUNTIME_SEC
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import Runnable
+from config import settings, TARGET_DEVICE, MAX_RUNTIME_SEC
 import streamlit as st # @st.cache_resource のため
 
 logging.basicConfig(level=logging.INFO)
@@ -21,10 +21,12 @@ class LLMHandler:
         LLMハンドラの初期化。
         APIキーのチェックと、LLMモデル、各チェーンの準備を行う。
         """
+        logger.info("LLMHandler初期化開始")
         if not settings.OPENAI_API_KEY:
             logger.error("OPENAI_API_KEY が .env に設定されていません。")
             raise ValueError("OPENAI_API_KEY must be set.")
             
+        logger.info("OpenAI APIキーの設定確認完了")
         # LLMモデルの定義
         self.llm = ChatOpenAI(
             # gpt-4o (推奨) または gpt-3.5-turbo など
@@ -35,12 +37,16 @@ class LLMHandler:
             # 毎回ほぼ同じ、安全で予測可能なコマンドを生成させる (仕様書要件に適う)
             temperature=0.0 
         )
+        logger.info("ChatOpenAIモデルの初期化完了")
         
         # 2種類のチェーン (処理の流れ) を定義
         # 1. コマンド生成専用チェーン
+        logger.info("コマンド生成チェーンの作成開始")
         self.command_generator_chain = self._create_command_generator_chain()
         # 2. 一般的な質問応答用チェーン
+        logger.info("QAチェーンの作成開始")
         self.qa_chain = self._create_qa_chain()
+        logger.info("LLMHandler初期化完了")
 
     def _create_command_generator_chain(self) -> Runnable:
         """
@@ -50,6 +56,7 @@ class LLMHandler:
         [最重要] プロンプトに仕様書の制約を厳密に反映させることが、
         このアシスタントの安全性と機能性を担保します。
         """
+        logger.info("コマンド生成チェーンの構築開始")
         
         # システムプロンプト (LLMの役割と制約を定義)
         system_prompt = f"""
@@ -107,11 +114,15 @@ You: Error: Request violates safety constraints or is unclear.
         # プロンプトテンプレートの作成
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt), # 上記のシステムプロンプト
-            ("human", "{query}")      # ユーザーの入力を受け取るプレースホルダー
+            ("human", """Previous conversation:
+{chat_history}
+
+Current request: {query}""")      # ユーザーの入力を受け取るプレースホルダー
         ])
         
         # LangChain Expression Language (LCEL) を使用したチェーンの定義
         # (プロンプト) -> (LLMモデル) -> (文字列出力パーサー)
+        logger.info("コマンド生成チェーンの構築完了")
         return prompt | self.llm | StrOutputParser()
 
     def _create_qa_chain(self) -> Runnable:
@@ -119,6 +130,7 @@ You: Error: Request violates safety constraints or is unclear.
         (仕様書要件) Ubuntu 24.04 に関する一般的な質問に回答するためのチェーン。
         こちらはコマンド生成とは異なり、通常の会話を行う。
         """
+        logger.info("QAチェーンの構築開始")
         system_prompt = """
 あなたは Ubuntu 24.04 に関する専門知識を持つ、親切なアシスタントです。
 ユーザーの質問に対して、簡潔かつ正確に回答してください。
@@ -126,17 +138,36 @@ You: Error: Request violates safety constraints or is unclear.
 """
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
-            ("human", "{query}")
+            ("human", """Previous conversation:
+{chat_history}
+
+Current question: {query}""")
         ])
+        logger.info("QAチェーンの構築完了")
         return prompt | self.llm | StrOutputParser()
 
-    def generate_bash_command(self, query: str) -> str:
+    def generate_bash_command(self, query: str, chat_history: list = None) -> str:
         """
         コマンド生成チェーンを実行し、自然言語クエリからbashコマンドを生成する。
+        
+        Args:
+            query (str): ユーザーの現在の入力
+            chat_history (list): 過去の会話履歴 [{"role": "user|assistant", "content": "..."}, ...]
         """
+        logger.info(f"コマンド生成開始 - クエリ: {query}")
+        if chat_history:
+            logger.info(f"会話履歴も含めて処理 (履歴数: {len(chat_history)} 件)")
         try:
             # チェーンを実行 (LLMがプロンプトに従ってコマンド or エラーを返す)
-            command = self.command_generator_chain.invoke({"query": query})
+            logger.info("LLMチェーンを実行中")
+            # 会話履歴を含めてLLMに送信
+            invoke_data = {"query": query, "chat_history": ""}
+            if chat_history:
+                invoke_data["chat_history"] = self._format_chat_history(chat_history)
+            
+            command = self.command_generator_chain.invoke(invoke_data)
+            logger.info(f"LLMから生のコマンドを受信: '{command}'")
+            logger.info(f"コマンドの型: {type(command)}, 長さ: {len(command) if command else 0}")
             
             # --- LLM出力のサニタイズ（念のため） ---
             # LLMがプロンプトの指示（説明不要）を破り、
@@ -144,12 +175,15 @@ You: Error: Request violates safety constraints or is unclear.
             command = command.strip().strip("`")
             if command.startswith("bash\n"):
                 command = command[5:].strip()
+            logger.info(f"サニタイズ後のコマンド: '{command}'")
                 
             # --- 二重検証 (仕様書要件: セキュリティ) ---
             # プロンプトで制約を与えても、LLMが制約を破る可能性はゼロではないため、
             # 生成されたコマンドをPythonコード側でも再度検証（バリデーション）する。
+            logger.info("コマンドの安全性検証を開始")
             if self._validate_generated_command(command):
                 # 検証OK
+                logger.info(f"コマンド生成成功: {command}")
                 return command
             else:
                 # 検証NG
@@ -165,8 +199,10 @@ You: Error: Request violates safety constraints or is unclear.
         生成されたコマンドが制約（特にfio）を守っているか最終チェックする。
         (プロンプトによる指示の二重チェック)
         """
+        logger.info(f"コマンド検証開始: {command}")
         # LLMが自らエラーを返した場合 (例: "Error: ...") は、安全なので許可
         if "Error:" in command:
+            logger.info("LLMがエラーメッセージを返したため、検証OK")
             return True 
 
         command_lower = command.lower()
@@ -181,6 +217,7 @@ You: Error: Request violates safety constraints or is unclear.
 
         # 2. fio の制約チェック
         if "fio" in command_lower:
+            logger.info("fioコマンドの詳細検証を開始")
             # 2a. 対象デバイスの検証 (仕様書要件)
             if TARGET_DEVICE not in command:
                 logger.warning(f"FIO検証失敗: 必須デバイス '{TARGET_DEVICE}' がコマンドに含まれていません。")
@@ -191,6 +228,7 @@ You: Error: Request violates safety constraints or is unclear.
             match = re.search(r"--runtime=(\d+)", command)
             if match:
                 runtime = int(match.group(1))
+                logger.info(f"fio実行時間チェック: {runtime}秒 (最大許容: {MAX_RUNTIME_SEC}秒)")
                 if runtime > MAX_RUNTIME_SEC:
                     logger.warning(f"FIO検証失敗: 実行時間 {runtime}s が最大許容時間 {MAX_RUNTIME_SEC}s を超えています。")
                     return False
@@ -202,14 +240,57 @@ You: Error: Request violates safety constraints or is unclear.
                      return False
                      
         # すべての検証をパス
+        logger.info("コマンド検証成功: すべてのチェックをパス")
         return True
 
-    def answer_question(self, query: str) -> str:
+    def _format_chat_history(self, chat_history: list) -> str:
+        """
+        チャット履歴をLLMが理解しやすい形式にフォーマットする。
+        
+        Args:
+            chat_history (list): [{"role": "user|assistant", "content": "..."}, ...]
+        
+        Returns:
+            str: フォーマットされた会話履歴文字列
+        """
+        if not chat_history:
+            return ""
+        
+        formatted_history = []
+        # 最新の5件の履歴のみを使用（トークン制限を考慮）
+        recent_history = chat_history[-10:] if len(chat_history) > 10 else chat_history
+        
+        for message in recent_history:
+            role = message.get("role", "")
+            content = message.get("content", "")
+            if role == "user":
+                formatted_history.append(f"User: {content}")
+            elif role == "assistant":
+                formatted_history.append(f"Assistant: {content}")
+        
+        return "\n".join(formatted_history)
+
+    def answer_question(self, query: str, chat_history: list = None) -> str:
         """
         QAチェーンを実行し、一般的な質問に回答する。
+        
+        Args:
+            query (str): ユーザーの現在の入力
+            chat_history (list): 過去の会話履歴 [{"role": "user|assistant", "content": "..."}, ...]
         """
+        logger.info(f"QA応答開始 - クエリ: {query}")
+        if chat_history:
+            logger.info(f"会話履歴も含めて処理 (履歴数: {len(chat_history)} 件)")
         try:
-            return self.qa_chain.invoke({"query": query})
+            logger.info("QAチェーンを実行中")
+            # 会話履歴を含めてLLMに送信
+            invoke_data = {"query": query, "chat_history": ""}
+            if chat_history:
+                invoke_data["chat_history"] = self._format_chat_history(chat_history)
+            
+            answer = self.qa_chain.invoke(invoke_data)
+            logger.info(f"QA応答完了 (長さ: {len(answer)} 文字)")
+            return answer
         except Exception as e:
             logger.error(f"質問応答 (LLM呼び出し) 中にエラー: {e}")
             return f"Error: Failed to invoke LLM. {e}"
@@ -222,8 +303,11 @@ def get_llm_handler():
     """
     LLMHandlerのシングルトンインスタンスを取得する。
     """
+    logger.info("get_llm_handler() 呼び出し")
     try:
-        return LLMHandler()
+        handler = LLMHandler()
+        logger.info("LLMHandlerインスタンス作成成功")
+        return handler
     except ValueError as e:
         # (例: OpenAI APIキーがない場合)
         logger.error(f"LLMハンドラの初期化に失敗しました: {e}")

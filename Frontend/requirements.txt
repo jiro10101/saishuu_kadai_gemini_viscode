@@ -1,5 +1,11 @@
+streamlit
+langchain
+langchain-openai
+langchain-core
+requests
+pydantic
+pydantic-settings
+python-dotenv
 fastapi
 uvicorn[standard]
 paramiko
-pydantic
-python-dotenv
