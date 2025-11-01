@@ -1,7 +1,7 @@
-streamlit
-langchain
-langchain-openai
-requests
+fastapi
+uvicorn[standard]
+paramiko
 pydantic
 python-dotenv
+
 

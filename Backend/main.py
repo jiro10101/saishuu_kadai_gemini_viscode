@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel
 import logging
-from . import ssh_executor
-from . import result_saver
-from .config import settings
+import os
+import ssh_executor
+import result_saver
+from config import settings
 
 # ロガー設定
 logging.basicConfig(level=logging.INFO)
@@ -39,16 +40,36 @@ class CommandResponse(BaseModel):
 @app.on_event("startup")
 def startup_event():
     """ FastAPIサーバ起動時に一度だけ実行される処理 """
+    logger.info("=== FastAPIバックエンドサーバ起動処理開始 ===")
     logger.info("FastAPIバックエンドサーバが起動します...")
+    
     # 設定値（認証情報除く）をログに出力し、設定ミスがないか確認しやすくする
+    logger.info("=== 設定値確認 ===")
     logger.info(f"SSH接続先ホスト: {settings.SSH_HOST}")
     logger.info(f"SSH接続ユーザー: {settings.SSH_USER}")
     logger.info(f"SSHキーパス: {settings.SSH_KEY_PATH}")
     logger.info(f"リモート保存先: {settings.REMOTE_SAVE_DIR}")
     
+    # セキュリティ確認
+    logger.info("=== 認証設定確認 ===")
+    if settings.SSH_KEY_PATH:
+        if os.path.exists(settings.SSH_KEY_PATH):
+            logger.info(f"SSHキーファイル存在確認: OK ({settings.SSH_KEY_PATH})")
+        else:
+            logger.warning(f"SSHキーファイルが見つかりません: {settings.SSH_KEY_PATH}")
+    
+    if settings.SSH_PASSWORD:
+        logger.info("SSHパスワード設定: あり")
+    else:
+        logger.info("SSHパスワード設定: なし")
+    
     if not settings.SSH_KEY_PATH and not settings.SSH_PASSWORD:
         logger.error("重大な設定エラー: SSH_KEY_PATH も SSH_PASSWORD も設定されていません。")
         logger.error("backend/.env ファイルを確認してください。")
+    else:
+        logger.info("認証設定: OK")
+    
+    logger.info("=== FastAPIバックエンドサーバ起動処理完了 ===")
 
 # --- APIエンドポイント定義 ---
 
@@ -66,7 +87,8 @@ def execute_command_endpoint(request: CommandRequest):
     command = request.command
     query = request.query
     
-    logger.info(f"コマンド実行リクエスト受信 (Query: '{query}'): {command}")
+    logger.info(f"=== execute_command_endpoint 開始 ===")
+    logger.info(f"受信したリクエスト - Query: '{query}', Command: '{command}'")
 
     # (仕様書要件) セキュリティ: 
     # 本来はフロントエンド(Streamlit/LLM)側でコマンドの検証を行う前提。
@@ -79,16 +101,22 @@ def execute_command_endpoint(request: CommandRequest):
     client = None
     try:
         # 1. SSH接続
+        logger.info("ステップ1: SSH接続を開始")
         client = ssh_executor.connect_ssh()
         if client is None:
             # 接続失敗時は 500 Internal Server Error を返す
             logger.error("SSH接続に失敗しました。認証情報 (ユーザー名、鍵、パスワード) とネットワーク設定を確認してください。")
             raise HTTPException(status_code=500, detail="SSH接続に失敗しました。バックエンドサーバのログを確認してください。")
+        logger.info("ステップ1: SSH接続成功")
 
         # 2. コマンド実行
+        logger.info("ステップ2: リモートコマンド実行を開始")
         stdout, stderr, exit_code = ssh_executor.run_remote_command(client, command)
+        logger.info(f"ステップ2: コマンド実行完了 - 終了コード: {exit_code}")
+        logger.debug(f"stdout長: {len(stdout)}文字, stderr長: {len(stderr)}文字")
         
         # 3. 結果保存
+        logger.info("ステップ3: 結果保存を開始")
         saved_path = result_saver.save_input_output(
             ssh_client=client,
             query=query if query else "N/A", # クエリが空の場合のフォールバック
@@ -99,27 +127,35 @@ def execute_command_endpoint(request: CommandRequest):
         
         if saved_path is None:
             logger.warning("コマンドは実行されましたが、リモートサーバへの結果保存に失敗しました。")
+        else:
+            logger.info(f"ステップ3: 結果保存成功 - パス: {saved_path}")
 
         # 4. Streamlitへのレスポンス
-        return CommandResponse(
+        logger.info("ステップ4: レスポンス作成")
+        response = CommandResponse(
             stdout=stdout,
             stderr=stderr,
             exit_code=exit_code,
             saved_path=saved_path # 保存パス (または失敗時はNone) を含める
         )
+        logger.info(f"=== execute_command_endpoint 正常終了 ===")
+        return response
 
     except HTTPException as http_exc:
         # 既にHTTPExceptionとして処理済みの場合はそのまま投げる
+        logger.error(f"HTTPException発生: {http_exc.status_code} - {http_exc.detail}")
         raise http_exc
     except Exception as e:
         # その他の予期せぬエラー
-        logger.error(f"コマンド実行のワークフロー全体でエラーが発生: {e}")
+        logger.error(f"予期せぬエラーが発生: {type(e).__name__}: {e}")
+        logger.error(f"=== execute_command_endpoint 異常終了 ===")
         raise HTTPException(status_code=500, detail=f"内部サーバーエラー: {e}")
     finally:
         # 処理が成功しても失敗しても、必ずSSH接続を切断する
         if client:
+            logger.info("SSH接続のクリーンアップを実行")
             client.close()
             logger.info("SSH接続を切断しました。")
 
 # Uvicornで実行する場合:
-# uvicorn backend.main:app --host 0.0.0.0 --port 8000
+# uvicorn main:app --host 0.0.0.0 --port 8000
