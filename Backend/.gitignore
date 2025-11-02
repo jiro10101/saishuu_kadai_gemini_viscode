@@ -18,6 +18,7 @@ venv/
 
 # Byte-compiled / logs
 *.log
+logs/
 
 # OS
 .DS_Store

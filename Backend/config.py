@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     )
 
     # --- SSH接続設定 ---
-    SSH_HOST: str = "itotest.tailfb67d0.ts.net"
+    SSH_HOST: str  #= "localhost"
     SSH_USER: str  # .env での定義が必須
     
     # os.path.expanduser は "~" (ホームディレクトリ) を解決するために使用
@@ -32,6 +32,9 @@ class Settings(BaseSettings):
 
     # --- 保存先設定 (仕様書要件) ---
     REMOTE_SAVE_DIR: str = "~/fio_results"
+    
+    # --- API認証設定 (シンプル認証) ---
+    API_KEY: str | None = None
 
 # 設定クラスのインスタンスを作成
 # この 'settings' オブジェクトを他のモジュールがインポートして使用する

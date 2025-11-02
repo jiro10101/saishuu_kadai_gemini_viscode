@@ -1,13 +1,16 @@
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Depends
 from pydantic import BaseModel
 import logging
 import os
 import ssh_executor
 import result_saver
 from config import settings
+from simple_auth import verify_api_key
+from logging_config import setup_logging
+from access_middleware import AccessLogMiddleware
 
-# ロガー設定
-logging.basicConfig(level=logging.INFO)
+# ログ設定を初期化
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # FastAPIアプリケーションインスタンスの作成
@@ -15,6 +18,9 @@ app = FastAPI(
     title="Linux Assistant Backend",
     description="SSH経由でLinuxコマンドを実行し、結果を保存するAPI (仕様書要件)"
 )
+
+# アクセスログミドルウェアを追加
+app.add_middleware(AccessLogMiddleware)
 
 # --- Pydanticモデル定義 (APIの入出力の型定義) ---
 
@@ -69,12 +75,22 @@ def startup_event():
     else:
         logger.info("認証設定: OK")
     
+    # API認証設定確認
+    logger.info("=== API認証設定確認 ===")
+    if settings.API_KEY:
+        logger.info("API認証: 有効 (X-API-Key ヘッダーが必要)")
+    else:
+        logger.warning("API認証: 無効 (セキュリティリスク)")
+    
     logger.info("=== FastAPIバックエンドサーバ起動処理完了 ===")
 
 # --- APIエンドポイント定義 ---
 
 @app.post("/execute", response_model=CommandResponse)
-def execute_command_endpoint(request: CommandRequest):
+def execute_command_endpoint(
+    request: CommandRequest,
+    api_key: str = Depends(verify_api_key)
+):
     """
     (仕様書要件) Streamlitフロントエンドからコマンド実行リクエストを受け付けるエンドポイント。
     
@@ -156,6 +172,62 @@ def execute_command_endpoint(request: CommandRequest):
             logger.info("SSH接続のクリーンアップを実行")
             client.close()
             logger.info("SSH接続を切断しました。")
+
+# --- 認証テスト用エンドポイント ---
+
+@app.get("/auth-test")
+def auth_test(api_key: str = Depends(verify_api_key)):
+    """API認証のテスト用エンドポイント"""
+    return {"message": "認証成功！", "status": "authenticated", "api_key_provided": api_key != "no-auth"}
+
+@app.get("/health")
+def health_check():
+    """認証不要のヘルスチェックエンドポイント"""
+    return {"status": "ok", "message": "サーバーは正常に動作しています"}
+
+@app.get("/logs")
+def get_recent_logs(api_key: str = Depends(verify_api_key), lines: int = 50):
+    """最近のアクセスログを取得（認証必要）"""
+    import os
+    from pathlib import Path
+    
+    log_file = Path("logs/access.log")
+    if not log_file.exists():
+        return {"error": "ログファイルが見つかりません"}
+    
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            all_lines = f.readlines()
+            recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            
+        return {
+            "total_lines": len(all_lines),
+            "returned_lines": len(recent_lines),
+            "logs": [line.strip() for line in recent_lines]
+        }
+    except Exception as e:
+        return {"error": f"ログファイル読み取りエラー: {str(e)}"}
+
+@app.get("/logs/stats")
+def get_log_stats(api_key: str = Depends(verify_api_key)):
+    """ログファイルの統計情報を取得"""
+    from pathlib import Path
+    import os
+    
+    log_dir = Path("logs")
+    if not log_dir.exists():
+        return {"error": "ログディレクトリが見つかりません"}
+    
+    stats = {}
+    for log_file in log_dir.glob("*.log"):
+        file_stat = os.stat(log_file)
+        stats[log_file.name] = {
+            "size_bytes": file_stat.st_size,
+            "size_mb": round(file_stat.st_size / (1024*1024), 2),
+            "modified": file_stat.st_mtime
+        }
+    
+    return {"log_files": stats}
 
 # Uvicornで実行する場合:
 # uvicorn main:app --host 0.0.0.0 --port 8000
