@@ -32,8 +32,21 @@ def main():
     Streamlit UIのメイン関数 (エントリーポイント)
     """
     logger.info("main() 関数開始")
-    st.title(f"🤖 Linux アシスタント (Ubuntu 24.04)")
-    st.caption(f"SSH接続先ホスト: **{SSH_TARGET_HOST}**")
+    st.markdown("### 🤖 Linux アシスタント (Ubuntu 24.04)")
+    # 使用例の表示
+    with st.expander("💡 使用例", expanded=False):
+        st.markdown("""
+        **fio コマンド例:**
+        - SeqWriteを測定して
+        - RandReadを測定して
+        
+        **システム情報例:**
+        - ディスク容量を知りたい
+        
+        **一般的な質問例:**
+        - Ubuntuでファイルを検索する方法は？
+        - プロセス一覧を確認したい
+        """)
     
     # --- LLMハンドラの初期化 ---
     logger.info("LLMハンドラの初期化を開始")
