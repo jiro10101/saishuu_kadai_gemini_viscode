@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import logging
-from config import settings, SSH_TARGET_HOST
+from config import settings, SSH_TARGET_HOST, get_backend_headers
 from llm_handler import get_llm_handler # キャッシュされたハンドラを取得
 
 # ロガー設定
@@ -178,7 +178,16 @@ def execute_command(command: str, query: str | None):
             logger.info("FastAPIバックエンドへのPOSTリクエスト開始")
             # requestsライブラリを使ってFastAPIにPOSTリクエストを送信
             # fio実行は10秒以上かかるため、タイムアウトを長め(120秒)に設定
-            response = requests.post(api_url, json=payload, timeout=120) 
+            # 必要に応じてヘッダーに API キーを付与
+            headers = None
+            try:
+                headers = get_backend_headers()  # from config.py
+            except Exception:
+                headers = None
+
+            if headers:
+                logger.debug(f"送信ヘッダー: {headers}")
+            response = requests.post(api_url, json=payload, timeout=120, headers=headers)
             logger.info(f"FastAPIレスポンス受信 - ステータスコード: {response.status_code}")
             
         # 1. バックエンドからの応答が正常 (HTTP 200) の場合
